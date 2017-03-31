@@ -1,2 +1,2 @@
 # densitystackr
-R package implement model stacking for models that output predictive distributions.
+R package currently using gradient boosting to implement model stacking for models that output predictive distributions.

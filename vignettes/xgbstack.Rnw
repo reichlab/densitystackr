@@ -1,0 +1,137 @@
+\documentclass[fleqn]{article}
+
+\usepackage{geometry}
+\geometry{letterpaper, top=1.5cm, left=2cm, right=2cm}
+
+\usepackage{amssymb, amsmath, amsfonts}
+
+
+\include{GrandMacros}
+
+\newcommand{\cdf}{{c.d.f.} }
+\newcommand{\pdf}{{p.d.f.} }
+\newcommand{\ind}{\mathbb{I}}
+\newcommand{\logsum}{\bigoplus}
+
+\begin{document}
+
+
+\section{Loss Function and its Derivatives}
+
+In this Section, we write down the math.  We will use the symbol $\logsum$ to denote the log-space summation operator: $\logsum_{i = 1}^N \log(a_i) = \log\left(\sum_{i = 1}^N a_i\right)$.  Writing expressions using this notation will allow us to obtain numerically stable computational expressions.
+
+Let $m \in \{1, \ldots, M\}$ index component predictive models and $i \in \{1, \ldots, N\}$ index prediction cases in the training data.  For example, in a seasonal time series prediction context $i$ may index times at which we make predictions for seasonal quantities, or combination of a time at which we make a prediction and the prediction horizon for predictions at individual weeks.  Let $f_{m}(y_i | \bx_i)$ denote the predictive density from model $m$ for the value of the random variable $Y_i$.  The $\bx_i$ is a vector observed covariates which may be used by any of the component models as conditioning variables in forming the predictive distribution, and is also used in calculating the component model weights.  Note that the component models and computation of the component model weights may use a proper subset of the variables in $\bx_i$.
+
+The combined predictive density for case $i$ is
+\begin{align}
+f(y_i | \bx_i) &= \sum_{m = 1}^M \pi_{m}(\bx_i) f_{m}(y_i | \bx_i) \text{, where} \label{eqn:EnsembleModel} \\
+\pi_{m}(\bx_i) &= \frac{\exp\{\rho_m(\bx_i)\}}{\sum_{m' = 1}^M \exp\{\rho_{m'}(\bx_i)\}} \label{eqn:PiMultilogitRho}
+\end{align}
+In Equation~\eqref{eqn:EnsembleModel} the $\pi_m(\bx_i)$ are the model weights, which we regard as functions of $\bx_i$.  These weights must be non-negative and sum to $1$ across $m$.  We ensure that these constraints are met by parameterizing the $\pi_m(\bx_i)$ in terms of the softmax transformation of real-valued functions $\rho_m(\bx_i)$ in Equation~\eqref{eqn:PiMultilogitRho}.  For notational brevity, we will suppress the expression of these quantities as functions of $\bx_i$ and write $\rho_m(\bx_i) = \rho_{mi}$ with $\brho = (\rho_{11}, \ldots, \rho_{MN})$, and $\pi_m(\bx_i) = \pi_{mi}$ with $\bpi = (\pi_{11}, \ldots, \pi_{MN})$.
+
+Our goal is to estimate the functions $\rho_{mi}$.  To do this, we require as inputs cross-validated estimates of $\log\{f_m(y_i | \bx_i)\}$ for each component model $m$ and case $i$ in the training data; we denote these values by $\log\{f^{cv}_m(y_i | \bx_i)\}$.  We will focus on optimization of the log-score of the combined predictive distribution for now; we may consider other loss functions in the future.  Considered as a function of the vector of values $\rho_{mi}$ for each combination of $m$ and $i$, this loss function is given by
+
+\begin{align}
+L(\brho) &= \sum_{i=1}^N \log\{f(y_i | \bx_i)\} \\
+&= \sum_{i=1}^N \log \left\{ \sum_{m = 1}^M \pi_{mi} f_{m}(y_i | \bx_i) \right\} \\
+&= \sum_{i=1}^N \log \left\{ \sum_{m = 1}^M \frac{\exp(\rho_{mi})}{\sum_{m' = 1}^M \exp(\rho_{m'i})} f_{m}(y_i | \bx_i) \right\}
+\end{align}
+
+We must find the first and second order partial derivatives of $L$ with respect to each $\rho_{m^*i^*}$.
+
+\begin{align}
+\frac{\partial}{\partial \rho_{m^*i^*}} L(\brho) &= \frac{\partial}{\partial \rho_{m^*i^*}} \sum_{i=1}^N \log \left\{ \sum_{m = 1}^M \frac{\exp(\rho_{mi})}{\sum_{m' = 1}^M \exp(\rho_{m'i})} f_{m}(y_i | \bx_i) \right\} \\
+&= \left\{ \frac{1}{ \sum_{m = 1}^M \frac{\exp(\rho_{mi^*})}{\sum_{m' = 1}^M \exp(\rho_{m'i^*})} f_{m}(y_{i^*} | \bx_{i^*}) } \right\} \times \frac{\partial}{\partial \rho_{m^*i^*}} \sum_{m = 1}^M \frac{\exp(\rho_{mi^*})}{\sum_{m' = 1}^M \exp(\rho_{m'i^*})} f_{m}(y_{i^*} | \bx_{i^*}) \label{eqn:PartialLPartialRhoFirstStep}
+\end{align}
+
+Now note that for $m^* = m$, 
+\begin{align*}
+\frac{\partial}{\partial \rho_{m^*i^*}} \pi_{mi^*} &= \frac{\partial}{\partial \rho_{m^*i^*}} \frac{\exp(\rho_{mi^*})}{\sum_{m' = 1}^M \exp(\rho_{m'i^*})} \\
+&= \frac{\exp(\rho_{mi^*})\left\{\sum_{m' = 1}^M \exp(\rho_{m'i^*})\right\} - \exp(\rho_{mi^*})^2}{\left\{\sum_{m' = 1}^M \exp(\rho_{m'i^*})\right\}^2} \\
+&= \pi_{mi^*} - \pi_{mi^*}^2.
+\end{align*}
+
+For $m^* \neq m$,
+\begin{align*}
+\frac{\partial}{\partial \rho_{m^*i^*}} \pi_{mi^*} &= \frac{\partial}{\partial \rho_{m^*i^*}} \frac{\exp(\rho_{mi^*})}{\sum_{m' = 1}^M \exp(\rho_{m'i^*})} \\
+&= \frac{- \exp(\rho_{mi^*})\exp(\rho_{m^*i^*})}{\left\{\sum_{m' = 1}^M \exp(\rho_{m'i^*})\right\}^2} \\
+&= - \pi_{mi^*}\pi_{m^*i^*}.
+\end{align*}
+
+Substituting these results into Equation~\eqref{eqn:PartialLPartialRhoFirstStep}, we obtain
+\begin{align}
+\frac{\partial}{\partial \rho_{m^*i^*}} L(\brho) &= \left\{ \frac{1}{ \sum_{m = 1}^M \pi_{mi^*} f_{m}(y_{i^*} | \bx_{i^*}) } \right\} \left\{\pi_{m^*i^*}\left(f_{m^*}(y_{i^*} | \bx_{i^*}) - \sum_{m = 1}^M \pi_{mi^*} f_{m}(y_{i^*} | \bx_{i^*}) \right) \right\} \\
+&= \frac{\pi_{m^*i^*}f_{m^*}(y_{i^*} | \bx_{i^*})}{ \sum_{m = 1}^M \pi_{mi^*} f_{m}(y_{i^*} | \bx_{i^*}) } - \pi_{m^*i^*}
+\end{align}
+% Verified on Wolfram Alpha via
+% d/dx ln( (exp(x)/(exp(x) + exp(a) + exp(b))) * c + (exp(a)/(exp(x) + exp(a) + exp(b))) * d + (exp(b)/(exp(x) + exp(a) + exp(b))) * e )
+
+Now, we calculate the second order derivative as
+
+\begin{align}
+\frac{\partial^2}{\partial \rho_{m^*i^*}^2} L(\brho) &= \frac{\partial}{\partial \rho_{m^*i^*}} \left[ \frac{\partial}{\partial \rho_{m^*i^*}} L(\brho) \right] \\
+&= \frac{\partial}{\partial \rho_{m^*i^*}} \left[ \frac{\pi_{m^*i^*}f_{m^*}(y_{i^*} | \bx_{i^*})}{ \sum_{m = 1}^M \pi_{mi^*} f_{m}(y_{i^*} | \bx_{i^*}) } - \pi_{m^*i^*} \right] \\
+&= \frac{\left(\pi_{m^*i^*} - \pi_{m^*i^*}^2\right)f_{m^*}(y_{i^*} | \bx_{i^*}) \sum_{m = 1}^M \pi_{mi^*} f_{m}(y_{i^*} | \bx_{i^*})}{\left\{ \sum_{m = 1}^M \pi_{mi^*} f_{m}(y_{i^*} | \bx_{i^*}) \right\}^2} \\
+&\qquad - \frac{\pi_{m^*i^*}f_{m^*}(y_{i^*} | \bx_{i^*}) 
+\left\{\pi_{m^*i^*}\left(f_{m^*}(y_{i^*} | \bx_{i^*}) - \sum_{m = 1}^M \pi_{mi^*} f_{m}(y_{i^*} | \bx_{i^*}) \right) \right\}
+}{\left\{ \sum_{m = 1}^M \pi_{mi^*} f_{m}(y_{i^*} | \bx_{i^*}) \right\}^2} \\
+&\qquad - \left(\pi_{m^*i^*} - \pi_{m^*i^*}^2\right) \\
+&= \left(1 - \pi_{m^*i^*}\right) \frac{\pi_{m^*i^*}f_{m^*}(y_{i^*} | \bx_{i^*}) }{ \sum_{m = 1}^M \pi_{mi^*} f_{m}(y_{i^*} | \bx_{i^*})} \\
+&\qquad - \left[\frac{\pi_{m^*i^*}f_{m^*}(y_{i^*} | \bx_{i^*})}{\sum_{m = 1}^M \pi_{mi^*} f_{m}(y_{i^*} | \bx_{i^*})}\right]^2 + \pi_{m^*i^*} \frac{\pi_{m^*i^*}f_{m^*}(y_{i^*} | \bx_{i^*})}{\sum_{m = 1}^M \pi_{mi^*} f_{m}(y_{i^*} | \bx_{i^*})} \\
+&\qquad - \left(\pi_{m^*i^*} - \pi_{m^*i^*}^2\right) \\
+&= \frac{\pi_{m^*i^*}f_{m^*}(y_{i^*} | \bx_{i^*}) }{ \sum_{m = 1}^M \pi_{mi^*} f_{m}(y_{i^*} | \bx_{i^*})} - \left[\frac{\pi_{m^*i^*}f_{m^*}(y_{i^*} | \bx_{i^*})}{\sum_{m = 1}^M \pi_{mi^*} f_{m}(y_{i^*} | \bx_{i^*})}\right]^2 - \left(\pi_{m^*i^*} - \pi_{m^*i^*}^2\right)
+\end{align}
+
+% Verified on Wolfram Alpha via
+% d^2/dx^2 ln( (exp(x)/(exp(x) + exp(a) + exp(b))) * c + (exp(a)/(exp(x) + exp(a) + exp(b))) * d + (exp(b)/(exp(x) + exp(a) + exp(b))) * e )
+
+
+\section{Simulated Application}
+
+<<>>={r}
+library(tidyr)
+library(dplyr)
+library(xgboost)
+library(xgbstack)
+library(ggplot2)
+
+### For now, let's just make up some data for the purposes of method development
+### this will need to go into test code too
+set.seed(9873)
+loso_pred_res <- data.frame(
+  model = paste0("log_score_", rep(letters[1:3], each = 100)),
+  d = rep(1:100, times = 3),
+  loso_log_score = c(
+    log(runif(100, 0, 1)), # model a's performance not related to d
+    sort(log(runif(100, 0, 1))), # model b's performance increasing in d
+    rep(-0.5, 100))  # model c's performance constant
+) %>%
+  spread(model, loso_log_score)
+
+## Obtain stacking model fit
+fit <- xgbstack(log_score_a + log_score_b + log_score_c ~ d,
+  data = loso_pred_res,
+  nrounds = 1000)
+
+## Make a plot
+component_model_scores_df <- as.data.frame(as.matrix(
+      loso_pred_res[, paste0("log_score_", letters[1:3]), drop = FALSE]
+    ) %>%
+    `storage.mode<-`("double")) %>%
+  `colnames<-`(letters[1:3]) %>%
+  gather_("model", "score", letters[1:3]) %>%
+  mutate(d = rep(1:100, 3))
+
+component_model_weights_df <-
+  compute_model_weights(fit, newdata = data.frame(d = 1:100), log = FALSE) %>%
+  as.data.frame() %>%
+  `colnames<-`(letters[1:3]) %>%
+  gather_("model", "weight", letters[1:3]) %>%
+  mutate(d = rep(1:100, 3))
+
+ggplot() +
+  geom_point(aes(x = d, y = score, colour = model), data = component_model_scores_df) +
+  geom_point(aes(x = d, y = weight, colour = model), shape = 15, data = component_model_weights_df)
+@
+
+\end{document}

@@ -370,11 +370,11 @@ xgbstack <- function(formula,
   ## process the update argument
   update_same_data_and_cv <- FALSE
   if(!is.null(update)) {
-    if(!identical(class(update, "xgbstack"))) {
+    if(!identical(class(update), "xgbstack")) {
       stop("Argument update must be an object of class xgbstack.")
     }
     
-    if(identical(formula, update$formula) &&
+    if(identical(as.character(formula), as.character(update$formula)) &&
         identical(model_scores, update$model_scores) &&
         identical(dtrain_Rmatrix, update$dtrain_Rmatrix)) {
       ## data from update is same as data provided now
@@ -469,7 +469,7 @@ xgbstack <- function(formula,
     ## combinations (don't re-estimate cv results already in update)
     if(update_same_data_and_cv) {
       cv_results <- cv_results %>%
-        anti_join(update$cv_results, by = names(base_params))
+        anti_join(update$cv_results, by = names(base_params)[names(base_params) != "nthread"])
     }
     
     ## space for cv results

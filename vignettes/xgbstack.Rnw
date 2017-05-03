@@ -16,7 +16,156 @@
 \begin{document}
 
 
-\section{Loss Function and its Derivatives}
+
+\section{Loss Function and its Derivatives: Smoothing Splines}
+
+In this Section, we write down the math for estimation via splines.
+We will use the symbol $\logsum$ to denote the log-space summation operator:
+$\logsum_{i = 1}^N \log(a_i) = \log\left(\sum_{i = 1}^N a_i\right)$.
+Writing expressions using this notation will allow us to obtain numerically
+stable computational expressions.
+
+Let $m \in \{1, \ldots, M\}$ index component predictive models and
+$i \in \{1, \ldots, N\}$ index prediction cases in the training data.
+For example, in a seasonal time series prediction context $i$ may index
+times at which we make predictions for seasonal quantities, or combination of
+a time at which we make a prediction and the prediction horizon for predictions
+at individual weeks.  Let $f_{m}(y_i | \bx_i)$ denote the predictive density
+from model $m$ for the value of the random variable $Y_i$.  The $\bx_i$ is a
+vector observed covariates which may be used by any of the component models
+as conditioning variables in forming the predictive distribution, and is also
+used in calculating the component model weights.  Note that the component models
+and computation of the component model weights may use a proper subset of the
+variables in $\bx_i$.
+
+The combined predictive density for case $i$ is
+\begin{align}
+f(y_i | \bx_i) &= \sum_{m = 1}^M \pi_{m}(\bx_i) f_{m}(y_i | \bx_i) \text{, where} \label{eqn:EnsembleModel} \\
+\pi_{m}(\bx_i) &= \frac{\exp\{\sum_{j = 1}^J s_{mj}(x_{ij})\}}{\exp\{\sum_{m' = 1}^M \sum_{j = 1}^J s_{m'j}(x_{ij})\}} \label{eqn:PiMultilogitSplines} \\
+&= \frac{\exp(\sum_{j = 1}^J B'_{ij} \btheta_{mj})}{\exp(\sum_{m' = 1}^M \sum_{j = 1}^J B'_{ij} \btheta_{m'j})} \label{eqn:PiMultilogitSplinesMatrixForm}
+\end{align}
+In Equation~\eqref{eqn:EnsembleModel} the $\pi_m(\bx_i)$ are the model weights,
+which we regard as functions of $\bx_i$.  These weights must be non-negative and
+sum to $1$ across $m$.  We ensure that these constraints are met by
+parameterizing the $\pi_m(\bx_i)$ in terms of the softmax transformation of
+a separate smoothing spline for each covariate in Equation~\eqref{eqn:PiMultilogitSplines}.
+Equation~\eqref{eqn:PiMultilogitSplinesMatrixForm} represents the spline
+function $s_{mj}$ for the $m$th model and $j$th covariate evaluated at $x_{ij}$
+as the product of a vector $B'_{ij}$ of B-spline basis functions evaluated at
+$x_{ij}$ and a corresponding vector $\btheta_{mj}$ of coefficients.
+
+As usual with smoothing splines, we proceed with estimation of the coefficient
+vectors $\btheta_{mj}$ under a penalty on the integrated second derivative of
+the spline functions.  We use a penalty $\lambda_j$ for each covariate $j$ that
+is shared across all values of $m$, so that $\lambda_j$ effectively controls the
+smoothness of the weighting function as the $j$th covariate varies.
+
+Putting these pieces together, the penalized loss function used in estimation is
+\begin{align}
+\ell(\btheta) &= \sum_{i=1}^N \log\{f(y_i | \bx_i)\} - \frac{1}{2} \sum_j \lambda_j \sum_m \int \left\{s''(x)\right\} \mathrm{d}x \\
+&= \sum_{i=1}^N \log \left\{ \sum_{m = 1}^M \pi_{mi} f_{m}(y_i | \bx_i) \right\} - \frac{1}{2} \sum_j \lambda_j \sum_m \btheta'_{mj} \Omega_{j} \btheta_{mj} \\
+&= \sum_{i=1}^N \log \left\{ \sum_{m = 1}^M \frac{\exp(\sum_{j = 1}^J B'_{ij} \btheta_{mj})}{\sum_{m' = 1}^M \exp(\sum_{j = 1}^J B'_{ij} \btheta_{m'j})} f_{m}(y_i | \bx_i) \right\} - \frac{1}{2} \sum_j \lambda_j \sum_m \btheta'_{mj} \Omega_{j} \btheta_{mj}
+\end{align}
+
+In order to estimate $\btheta$, we will use the backfitting algorithm that is
+standard for estimating generalized additive models.  This can alternatively be
+conceptualized as optimizing the penalized loss via a block update algorithm,
+where we update the parameters $\btheta_{mj}$ for one spline at a time.
+To do this, we will use a Newton update in each step:
+\begin{equation}
+\btheta_{mj}^{\text{new}} = \btheta_{mj}^{\text{old}} - \left\{\frac{\partial^2 \ell(\btheta)}{\partial \btheta_{mj} \partial \btheta'_{mj}}\right\}^{-1} \frac{\partial \ell(\btheta)}{\partial \btheta_{mj}}, \label{eqn:NRParamUpdate}
+\end{equation}
+where the partial derivatives are taken at $\btheta_{mj}^{\text{old}}$.
+
+To proceed, we must calculate the gradient and Hessian of the likelihood function
+with respect to a particular set of spline parameters which we will denote by
+$\btheta_{m^*j^*}$.
+
+It will be helpful to obtain the preliminary results that
+\begin{align}
+\frac{\partial \pi_{m^*i}}{\partial \btheta_{m^*j^*}} &= \frac{\partial }{\partial \btheta_{m^*j^*}} \frac{\exp(\sum_{j = 1}^J B'_{ij} \btheta_{m^*j})}{\exp(\sum_{m' = 1}^M \sum_{j = 1}^J B'_{ij} \btheta_{m'j})} \nonumber \\
+&= \frac{\exp(\sum_{j = 1}^J B'_{ij} \btheta_{m^*j}) \left\{\sum_{m' = 1}^M \exp(\sum_{j = 1}^J B'_{ij} \btheta_{m'j})\right\} B_{ij^*} -  \left\{\exp(\sum_{j = 1}^J B'_{ij} \btheta_{m^*j})\right\}^2 B_{ij^*} }{\left\{\sum_{m' = 1}^M \exp(\sum_{j = 1}^J B'_{ij} \btheta_{m'j})\right\}^2} \nonumber \\
+&= (\pi_{m^*i} - \pi_{m^*i}^2) B_{ij^*},
+\end{align}
+while for $m \neq m^*$
+\begin{align}
+\frac{\partial \pi_{mi}}{\partial \btheta_{m^*j^*}} &= \frac{\partial }{\partial \btheta_{m^*j^*}} \frac{\exp(\sum_{j = 1}^J B'_{ij} \btheta_{mj})}{\exp(\sum_{m' = 1}^M \sum_{j = 1}^J B'_{ij} \btheta_{m'j})} \nonumber \\
+&= \frac{ -  \exp(\sum_{j = 1}^J B'_{ij} \btheta_{mj}) \exp(\sum_{j = 1}^J B'_{ij} \btheta_{m^*j}) B_{ij^*} }{\left\{\sum_{m' = 1}^M \exp(\sum_{j = 1}^J B'_{ij} \btheta_{m'j})\right\}^2} \nonumber \\
+&= (- \pi_{m^*i} \pi_{mi}) B_{ij^*}.
+\end{align}
+
+We now calculate the gradient as
+\begin{align}
+\frac{\partial \ell(\btheta)}{\partial \btheta_{m^*j^*}} &=
+  \frac{\partial}{\partial \btheta_{m^*j^*}} \left[ \sum_{i=1}^N \log \left\{ \sum_{m = 1}^M \pi_{mi} f_{m}(y_i | \bx_i) \right\} - \frac{1}{2} \sum_j \lambda_j \sum_m \btheta'_{mj} \Omega_{j} \btheta_{mj} \right] \nonumber \\
+&= \sum_{i=1}^N \frac{1}{f(y_i | x_i)} \left\{ \pi_{m^*i}f_{m^*}(y_i | x_i) - \sum_{m = 1}^M \pi_{mi} \pi_{m^*i} f_m(y_i | x_i) \right\} B_{ij^*} - \lambda_{j^*} \Omega_{j^*} \btheta_{m^*j^*} \nonumber \\
+&= \sum_{i=1}^N \pi_{m^*i} \left\{ \frac{f_{m^*}(y_i | x_i)}{f(y_i | x_i)} - 1 \right\} B_{ij^*} - \lambda_{j^*} \Omega_{j^*} \btheta_{m^*j^*} \nonumber \\
+&= B'_{j^*} \bg - \lambda_{j^*} \Omega_{j^*} \btheta_{m^*j^*}. \label{eqn:LossSplinesGradWRTTheta}
+\end{align}
+
+In Equation~\eqref{eqn:LossSplinesGradWRTTheta}, $B_{j^*}$ is an $N \times D_{j^*}$
+matrix with the $D_{j^*}$ spline basis functions for covariate $j^*$ evaluated
+at each observation $i = 1, \ldots, N$.  $\bg$ is a column vector of length $N$
+where entry $i$ is $\pi_{m^*i} \left\{ \frac{f_{m^*}(y_i | x_i)}{f(y_i | x_i)} - 1 \right\}$.
+This quantity has the interpretation that the contribution to the gradient from
+observation $i$ is positive if the conditional density for $Y_i | X_i$ from
+model $m^*$ was larger at the observed outcome $y_i$ than the combined
+conditional density after the previous iteration.
+
+We can calculate the Hessian as
+\begin{align}
+&\frac{\partial^2 \ell(\btheta)}{\partial \btheta_{m^*j^*} \partial \btheta'_{m^*j^*}} =
+  \frac{\partial \ell(\btheta)}{\partial \btheta'_{m^*j^*}} \left[ \sum_{i=1}^N B_{ij^*} \pi_{m^*i} \left\{ \frac{f_{m^*}(y_i | x_i)}{f(y_i | x_i)} - 1 \right\} - \lambda_{j^*} \Omega_{j^*} \btheta_{m^*j^*} \right] \\
+&\qquad = \frac{\partial \ell(\btheta)}{\partial \btheta'_{m^*j^*}} \left[ \sum_{i=1}^N B_{ij^*} \left\{ \frac{\pi_{m^*i} f_{m^*}(y_i | x_i)}{\sum_{m' = 1}^M \pi_{m'i} f_{m'}(y_i | x_i)} - \pi_{m^*i} \right\} - \lambda_{j^*} \Omega_{j^*} \btheta_{m^*j^*} \right] \\
+&\qquad = \sum_{i=1}^N B_{ij^*} \left\{ \frac{(\pi_{m^*i} - \pi_{m^*i}^2 ) f_{m^*}(y_i | x_i) \left\{\sum_{m' = 1}^M \pi_{m'i} f_{m'}(y_i | x_i)\right\} B'_{ij^*} }{\left\{\sum_{m' = 1}^M \pi_{m'i} f_{m'}(y_i | x_i)\right\}^2} \right. \\
+&\qquad \qquad \qquad \qquad \qquad \qquad - \left. \frac{\pi_{m^*i}^2 f_{m^*}(y_i | x_i) \left\{ f_{m^*}(y_i | x_i) - \sum_{m' = 1}^M \pi_{m'i} f_{m'}(y_i | x_i) \right\} B'_{ij^*} }{\left\{\sum_{m' = 1}^M \pi_{m'i} f_{m'}(y_i | x_i)\right\}^2} \right. \\
+&\qquad \qquad \qquad \qquad \qquad \qquad \left. - (\pi_{m^*i} - \pi_{m^*i}^2 ) B'_{ij^*} \vphantom{\frac{(\pi_{m^*i} - \pi_{m^*i}^2 ) \left\{\sum_{m' = 1}^M \pi_{m'i} f_{m'}(y_i | x_i)\right\} B'_{ij^*} - \pi_{m^*i}^2 \left\{ 1 - \sum_{m' = 1}^M \pi_{m'i} f_{m'}(y_i | x_i) \right\} B'_{ij^*} }{\left\{\sum_{m' = 1}^M \pi_{m'i} f_{m'}(y_i | x_i)\right\}^2}} \right\} - \lambda_{j^*} \Omega_{j^*} \\
+&\qquad = \sum_{i=1}^N B_{ij^*} \left[ \pi_{m^*i} \left\{\frac{f_{m*}(y_i | x_i)}{f(y_i | x_i)} - 1 \right\} - \pi_{m^*i}^2 \left\{ \left(\frac{f_{m*}(y_i | x_i)}{f(y_i | x_i)}\right)^2 - 1 \right\} \right] B'_{ij^*} - \lambda_{j^*} \Omega_{j^*} \\
+&\qquad = - B'_{j^*} W B_{j^*} - \lambda_{j^*} \Omega_{j^*}.
+\end{align}
+
+% d^2/dx^2 ln( (exp(f * x + g)/(exp(f * x + g) + exp(a) + exp(b))) * c + (exp(a)/(exp(f * x + g) + exp(a) + exp(b))) * d + (exp(b)/(exp(f * x + g) + exp(a) + exp(b))) * e )
+
+
+Here, $f(y_i | x_i)$ is the combined predictive density from the ensemble using
+the model weights obtained after the previous iteration of the parameter updating
+algorithm.  $W$ is an $N \times N$ diagonal matrix where the $i$th entry on the
+diagonal is
+$\left[ \pi_{m^*i}^2 \left\{ \left(\frac{f_{m*}(y_i | x_i)}{f(y_i | x_i)}\right)^2 - 1 \right\} - \pi_{m^*i} \left\{\frac{f_{m*}(y_i | x_i)}{f(y_i | x_i)} - 1 \right\} \right]$.
+In general these values may be negative, and the Hessian is not guaranteed to be
+positive definite (particularly if $\lambda_{j^*}$ is close to $0$).  In that
+case, the Newton update of Equation~\eqref{eqn:NRParamUpdate} is not appropriate
+since the update may not move in an ascent direction (cite Nocedal and Wright).
+In such cases, it is standard procedure to modify the Hessian to ensure that it
+is positive definite.  In this case, this can be achieved by truncating the
+diagonal entries of $W$ below at $\delta > 0$; we have used $\delta = 1$.
+This choice for $\delta$ is conservative and may reduce the convergence rate of
+the estimation procedure; we have not explored other possible values for $\delta$.
+
+Now returning to Equation~\eqref{eqn:NRParamUpdate}, the updated parameters in
+each iteration of the Newton-Raphson optimization procedure are obtained as
+\begin{align}
+&\btheta_{mj}^{\text{new}} = \btheta_{mj}^{\text{old}} - \left\{\frac{\partial^2 \ell(\btheta)}{\partial \btheta_{mj} \partial \btheta'_{mj}}\right\}^{-1} \frac{\partial \ell(\btheta)}{\partial \btheta_{mj}} \\
+&\qquad = \btheta_{mj}^{\text{old}} - \left\{ - B'_{j^*} W B_{j^*} - \lambda_{j^*} \Omega_{j^*} \right\}^{-1} \left\{ B'_{j^*} \bg - \lambda_{j^*} \Omega_{j^*} \btheta^{\text{old}}_{m^*j^*} \right\} \\
+&\qquad = \left\{ B'_{j^*} W B_{j^*} + \lambda_{j^*} \Omega_{j^*} \right\}^{-1} \left\{ B'_{j^*} \bg + B'_{j^*} W B_{j^*} \btheta^{\text{old}}_{m^*j^*} \right\} \label{eqn:NRUpdateSubstitute} \\
+&\qquad = \left\{ B'_{j^*} W B_{j^*} + \lambda_{j^*} \Omega_{j^*} \right\}^{-1} B'_{j^*} W \left\{ W^{-1} \bg + B_{j^*} \btheta^{\text{old}}_{m^*j^*} \right\} \label{eqn:NRUpdateFinal}
+\end{align}
+
+In Equation~\eqref{eqn:NRUpdateSubstitute}, we have used the fact that
+$\btheta^{\text{old}}_{m^*j^*} = \left\{ B'_{j^*} W B_{j^*} + \lambda_{j^*} \Omega_{j^*} \right\}^{-1} \left\{ B'_{j^*} W B_{j^*} + \lambda_{j^*} \Omega_{j^*} \right\} \btheta^{\text{old}}_{m^*j^*}$, so
+$\btheta^{\text{old}}_{m^*j^*} - \left\{ B'_{j^*} W B_{j^*} + \lambda_{j^*} \Omega_{j^*} \right\}^{-1} \lambda_{j^*} \Omega_{j^*} \btheta^{\text{old}}_{m^*j^*} = \left\{ B'_{j^*} W B_{j^*} + \lambda_{j^*} \Omega_{j^*} \right\}^{-1} B'_{j^*} W B_{j^*} \btheta^{\text{old}}_{m^*j^*}.$
+The updated estimates $\btheta_{mj}^{\text{new}}$ from
+Equation~\eqref{eqn:NRUpdateFinal} have the form of parameter estimates from a
+smoothing spline where the observations have weights specified by the elements
+of $W$ and the "working response" vector is given by
+$W^{-1} \bg + B_{j^*} \btheta^{\text{old}}_{m^*j^*}$.  It is informative to
+observe that the second term in this working response is the fitted spline value
+after the previous parameter update step, and the first term specifies that the
+parameters should be updated so as to move the spline fit in the direction of
+the vector $\bg$ of contributions to the gradient from each observation,
+scaled by the inverse of the observation weights in $W$.
+
+\section{Loss Function and its Derivatives: Boosting}
 
 In this Section, we write down the math.  We will use the symbol $\logsum$ to denote the log-space summation operator: $\logsum_{i = 1}^N \log(a_i) = \log\left(\sum_{i = 1}^N a_i\right)$.  Writing expressions using this notation will allow us to obtain numerically stable computational expressions.
 
@@ -44,7 +193,7 @@ We must find the first and second order partial derivatives of $L$ with respect 
 &= \left\{ \frac{1}{ \sum_{m = 1}^M \frac{\exp(\rho_{mi^*})}{\sum_{m' = 1}^M \exp(\rho_{m'i^*})} f_{m}(y_{i^*} | \bx_{i^*}) } \right\} \times \frac{\partial}{\partial \rho_{m^*i^*}} \sum_{m = 1}^M \frac{\exp(\rho_{mi^*})}{\sum_{m' = 1}^M \exp(\rho_{m'i^*})} f_{m}(y_{i^*} | \bx_{i^*}) \label{eqn:PartialLPartialRhoFirstStep}
 \end{align}
 
-Now note that for $m^* = m$, 
+Now note that for $m^* = m$,
 \begin{align*}
 \frac{\partial}{\partial \rho_{m^*i^*}} \pi_{mi^*} &= \frac{\partial}{\partial \rho_{m^*i^*}} \frac{\exp(\rho_{mi^*})}{\sum_{m' = 1}^M \exp(\rho_{m'i^*})} \\
 &= \frac{\exp(\rho_{mi^*})\left\{\sum_{m' = 1}^M \exp(\rho_{m'i^*})\right\} - \exp(\rho_{mi^*})^2}{\left\{\sum_{m' = 1}^M \exp(\rho_{m'i^*})\right\}^2} \\
@@ -72,7 +221,7 @@ Now, we calculate the second order derivative as
 \frac{\partial^2}{\partial \rho_{m^*i^*}^2} L(\brho) &= \frac{\partial}{\partial \rho_{m^*i^*}} \left[ \frac{\partial}{\partial \rho_{m^*i^*}} L(\brho) \right] \\
 &= \frac{\partial}{\partial \rho_{m^*i^*}} \left[ \frac{\pi_{m^*i^*}f_{m^*}(y_{i^*} | \bx_{i^*})}{ \sum_{m = 1}^M \pi_{mi^*} f_{m}(y_{i^*} | \bx_{i^*}) } - \pi_{m^*i^*} \right] \\
 &= \frac{\left(\pi_{m^*i^*} - \pi_{m^*i^*}^2\right)f_{m^*}(y_{i^*} | \bx_{i^*}) \sum_{m = 1}^M \pi_{mi^*} f_{m}(y_{i^*} | \bx_{i^*})}{\left\{ \sum_{m = 1}^M \pi_{mi^*} f_{m}(y_{i^*} | \bx_{i^*}) \right\}^2} \\
-&\qquad - \frac{\pi_{m^*i^*}f_{m^*}(y_{i^*} | \bx_{i^*}) 
+&\qquad - \frac{\pi_{m^*i^*}f_{m^*}(y_{i^*} | \bx_{i^*})
 \left\{\pi_{m^*i^*}\left(f_{m^*}(y_{i^*} | \bx_{i^*}) - \sum_{m = 1}^M \pi_{mi^*} f_{m}(y_{i^*} | \bx_{i^*}) \right) \right\}
 }{\left\{ \sum_{m = 1}^M \pi_{mi^*} f_{m}(y_{i^*} | \bx_{i^*}) \right\}^2} \\
 &\qquad - \left(\pi_{m^*i^*} - \pi_{m^*i^*}^2\right) \\
@@ -88,7 +237,7 @@ Now, we calculate the second order derivative as
 
 \section{Simulated Application}
 
-<<>>={r}
+<<>>={r, eval = FALSE}
 library(tidyr)
 library(dplyr)
 library(xgboost)

@@ -12,14 +12,14 @@ logspace_sub <- function(logx, logy) {
   return(.Call("logspace_sub_C",
     as.numeric(logx),
     as.numeric(logy),
-    PACKAGE = "xgbstack"))
+    PACKAGE = "densitystackr"))
 }
 
 logspace_add <- function(logx, logy) {
   return(.Call("logspace_add_C",
     as.numeric(logx),
     as.numeric(logy),
-    PACKAGE = "xgbstack"))
+    PACKAGE = "densitystackr"))
 }
 
 logspace_sum <- function(logx) {
@@ -32,15 +32,15 @@ logspace_sum_matrix_rows <- function(logX) {
     as.numeric(logX),
     as.integer(nrow(logX)),
     as.integer(ncol(logX)),
-    PACKAGE = "xgbstack"))
+    PACKAGE = "densitystackr"))
 }
 
 logspace_sub_matrix_rows <- function(logX) {
   if(!is.matrix(logX) || !identical(ncol(logX), 2L))
     stop("logX must be a matrix with 2 columns")
-  
+
   return(.Call("logspace_sub_matrix_rows_C",
     as.numeric(logX),
     as.integer(nrow(logX)),
-    PACKAGE = "xgbstack"))
+    PACKAGE = "densitystackr"))
 }

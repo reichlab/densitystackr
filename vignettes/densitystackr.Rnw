@@ -253,11 +253,13 @@ loso_pred_res <- data.frame(
     sort(log(runif(100, 0, 1))), # model b's performance increasing in d
     rep(-0.5, 100))  # model c's performance constant
 ) %>%
-  spread(model, loso_log_score)
+  spread(model, loso_log_score) %>%
+  mutate(e = rnorm(100))
 
 ## Obtain stacking model fit
+#debug(density_stack_splines_fixed_regularization)
 fit_time <- system.time({
-  stacking_fit <- density_stack_splines_fixed_lambda(
+  stacking_fit <- density_stack_splines_fixed_regularization(
     log_score_a + log_score_b + log_score_c ~ d,
     data = loso_pred_res,
     lambda = 1,
@@ -267,6 +269,23 @@ fit_time <- system.time({
 })
 
 cat(fit_time)
+
+require(doMC)
+registerDoMC(4)
+
+#debug(density_stack)
+fit_time_cv_reg <- system.time({
+  stacking_fit_cv_reg <- density_stack(
+    log_score_a + log_score_b + log_score_c ~ d,
+    data = loso_pred_res,
+    df = data.frame(d = seq(from = 3, by = 3, length = 10)),
+    min_obs_weight = 1,
+    tol = 10^{-3},
+    maxit = 10^5,
+    cv_folds = NULL,
+    cv_nfolds = 10L,
+    verbose = 1)
+})
 
 ## Make a plot
 component_model_scores_df <- as.data.frame(as.matrix(
@@ -286,9 +305,19 @@ component_model_weights_df <-
   gather_("model", "weight", letters[1:3]) %>%
   mutate(d = rep(1:100, 3))
 
+component_model_weights_df_cv_reg <-
+  compute_model_weights(stacking_fit_cv_reg,
+    newdata = data.frame(d = 1:100),
+    log = FALSE) %>%
+  as.data.frame() %>%
+  `colnames<-`(letters[1:3]) %>%
+  gather_("model", "weight", letters[1:3]) %>%
+  mutate(d = rep(1:100, 3))
+
 ggplot() +
   geom_point(aes(x = d, y = score, colour = model), data = component_model_scores_df) +
-  geom_point(aes(x = d, y = weight, colour = model), shape = 15, data = component_model_weights_df)
+  geom_point(aes(x = d, y = weight, colour = model), alpha = 0.5, shape = 15, data = component_model_weights_df) +
+  geom_point(aes(x = d, y = weight, colour = model), shape = 15, data = component_model_weights_df_cv_reg)
 @
 
 \end{document}

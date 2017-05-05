@@ -236,11 +236,13 @@ Now, we calculate the second order derivative as
 
 \section{Simulated Application}
 
-<<>>={r, eval = TRUE}
+<<SimulatedApplication, eval = TRUE, cache = TRUE>>=
+library(plyr)
 library(tidyr)
 library(dplyr)
 library(densitystackr)
 library(ggplot2)
+library(awes)
 
 ### For now, let's just make up some data for the purposes of method development
 ### this will need to go into test code too
@@ -318,6 +320,601 @@ ggplot() +
   geom_point(aes(x = d, y = score, colour = model), data = component_model_scores_df) +
   geom_point(aes(x = d, y = weight, colour = model), alpha = 0.5, shape = 15, data = component_model_weights_df) +
   geom_point(aes(x = d, y = weight, colour = model), shape = 15, data = component_model_weights_df_cv_reg)
+@
+
+
+\section{Real Application}
+
+<<NationalOnsetWeekFit, eval = TRUE, cache = TRUE>>=
+region <- "National"
+prediction_target <- "onset"
+explanatory_variables <- c("analysis_time_season_week")
+
+awes_path <- find.package("awes")
+target_loso_pred_res <- assemble_stacking_inputs(
+  regions = region,
+  prediction_target = prediction_target,
+  component_model_names = c("kde", "kcde", "sarima"),
+  explanatory_variables = explanatory_variables,
+  include_model_performance = TRUE,
+  preds_path = file.path(awes_path, "estimation/loso-predictions")
+)
+
+## get cross-validation groups
+cv_folds <- lapply(unique(target_loso_pred_res$analysis_time_season),
+  function(season_val) {
+    which(target_loso_pred_res$analysis_time_season == season_val)
+  })
+
+require(doMC)
+registerDoMC(4)
+
+#debug(density_stack)
+fit_formula <- as.formula(paste0(
+  paste0(c("kde", "kcde", "sarima"), "_log_score", collapse = " + "),
+  " ~ ",
+  paste(explanatory_variables, collapse = " + ")))
+fit_time_cv_reg <- system.time({
+  stacking_fit_cv_reg <- density_stack(
+    fit_formula,
+    data = target_loso_pred_res,
+    df = data.frame(
+      analysis_time_season_week = c(2, seq(from = 5, by = 5, to = 30))
+    ),
+    min_obs_weight = 1,
+    tol = 10^{-3},
+    maxit = 10^5,
+    cv_folds = cv_folds,
+    verbose = 1)
+})
+
+stacking_fits_fixed_reg <- lapply(c(2, seq(from = 5, by = 5, to = 30)),
+  function(df) {
+    density_stack(
+      fit_formula,
+      data = target_loso_pred_res,
+      df = df,
+      min_obs_weight = 1,
+      tol = 10^{-3},
+      maxit = 10^5,
+      cv_folds = cv_folds,
+      verbose = 0)
+  })
+@
+
+Estimation run time with leave-one-season-out cross-validation to compare spline
+df values
+<<FluModelsCVRunTime>>=
+fit_time_cv_reg
+@
+
+Plot of cross-validation results
+<<FluModelsOneFeatureCVResults, eval = TRUE, cache = TRUE>>=
+plot_df <- stacking_fit_cv_reg$cv_results
+plot_df$se <- apply(plot_df[, 2:13], 1, function(x) sd(x) / sqrt(12))
+plot_df$lb <- plot_df$cv_log_score_mean - plot_df$se
+plot_df$ub <- plot_df$cv_log_score_mean + plot_df$se
+
+ggplot(plot_df) +
+  geom_point(aes(x = analysis_time_season_week, y = cv_log_score_mean)) +
+  geom_errorbar(aes(x = analysis_time_season_week, ymin = lb, ymax = ub)) +
+  xlab("Spline df") +
+  ylab("CV mean log score across seasons held out") +
+  theme_bw()
+@
+
+Plot of weights from spline fits with different degrees of freedom -- best darker
+
+<<FluModelsOneFeatureWeights, eval = TRUE, cache = TRUE>>=
+get_legend_grob <- function(x) {
+  data <- ggplot2:::ggplot_build(x)
+
+  plot <- data$plot
+  panel <- data$panel
+  data <- data$data
+  theme <- ggplot2:::plot_theme(plot)
+  position <- theme$legend.position
+  if (length(position) == 2) {
+    position <- "manual"
+  }
+
+  legend_box <- if (position != "none") {
+    ggplot2:::build_guides(plot$scales, plot$layers, plot$mapping,
+      position, theme, plot$guides, plot$labels)
+  } else {
+    ggplot2:::zeroGrob()
+  }
+  if (ggplot2:::is.zero(legend_box)) {
+    position <- "none"
+  }
+  else {
+    legend_width <- gtable:::gtable_width(legend_box) + theme$legend.margin
+    legend_height <- gtable:::gtable_height(legend_box) + theme$legend.margin
+    just <- valid.just(theme$legend.justification)
+    xjust <- just[1]
+    yjust <- just[2]
+    if (position == "manual") {
+      xpos <- theme$legend.position[1]
+      ypos <- theme$legend.position[2]
+      legend_box <- editGrob(legend_box, vp = viewport(x = xpos,
+        y = ypos, just = c(xjust, yjust), height = legend_height,
+        width = legend_width))
+    }
+    else {
+      legend_box <- editGrob(legend_box, vp = viewport(x = xjust,
+        y = yjust, just = c(xjust, yjust)))
+    }
+  }
+  return(legend_box)
+}
+
+
+## get resulting model weights at a grid of values for chosen explanatory variables
+if("kcde_model_confidence" %in% explanatory_variables ||
+    "sarima_model_confidence" %in% explanatory_variables) {
+  if(identical(prediction_target, "peak_inc")) {
+    model_confidence_grid <- seq(from = 1, to = 99, by = 2)
+  } else if(identical(prediction_target, "onset")) {
+    model_confidence_grid <- seq_len(34)
+  } else {
+    ## peak_week
+    model_confidence_grid <- seq_len(33)
+  }
+} else {
+  model_confidence_grid <- 1
+}
+
+if("weighted_ili" %in% explanatory_variables) {
+  weighted_ili_grid <- seq(from = 0, to = 13, by = 0.5)
+} else {
+  weighted_ili_grid <- 1
+}
+
+typical_analysis_time_season_week <- 17L
+if(prediction_target %in% c("onset", "peak_week")) {
+  typical_model_confidence <- 5L
+} else {
+  typical_model_confidence <- 20L
+}
+typical_ili <- 2.5
+
+newdata <- bind_rows(
+  expand.grid(
+    analysis_time_season_week = 10:40,
+    kcde_model_confidence = model_confidence_grid,
+    sarima_model_confidence = typical_model_confidence,
+    weighted_ili = typical_ili,
+    stringsAsFactors = FALSE)[, explanatory_variables, drop = FALSE],
+  expand.grid(
+    analysis_time_season_week = 10:40,
+    kcde_model_confidence = typical_model_confidence,
+    sarima_model_confidence = model_confidence_grid,
+    weighted_ili = typical_ili,
+    stringsAsFactors = FALSE)[, explanatory_variables, drop = FALSE],
+  expand.grid(
+    analysis_time_season_week = 10:40,
+    kcde_model_confidence = typical_model_confidence,
+    sarima_model_confidence = typical_model_confidence,
+    weighted_ili = weighted_ili_grid,
+    stringsAsFactors = FALSE)[, explanatory_variables, drop = FALSE],
+  expand.grid(
+    analysis_time_season_week = typical_analysis_time_season_week,
+    kcde_model_confidence = model_confidence_grid,
+    sarima_model_confidence = model_confidence_grid,
+    weighted_ili = typical_ili,
+    stringsAsFactors = FALSE)[, explanatory_variables, drop = FALSE],
+  expand.grid(
+    analysis_time_season_week = typical_analysis_time_season_week,
+    kcde_model_confidence = model_confidence_grid,
+    sarima_model_confidence = typical_model_confidence,
+    weighted_ili = weighted_ili_grid,
+    stringsAsFactors = FALSE)[, explanatory_variables, drop = FALSE],
+  expand.grid(
+    analysis_time_season_week = typical_analysis_time_season_week,
+    kcde_model_confidence = typical_model_confidence,
+    sarima_model_confidence = model_confidence_grid,
+    weighted_ili = weighted_ili_grid,
+    stringsAsFactors = FALSE)[, explanatory_variables, drop = FALSE]
+  ) %>%
+  distinct()
+
+
+
+model_weights <- compute_model_weights(stacking_fit_cv_reg,
+  newdata = newdata,
+  log = FALSE)
+
+# model_weights <- compute_model_weights(stacking_fit_cv_fixed,
+#     newdata = newdata,
+#     log = FALSE)
+colnames(model_weights) <- c("kde", "kcde", "sarima")
+weights <- cbind(newdata,
+  model_weights) %>% as.data.frame()
+
+weights <- weights %>%
+  gather_("model", "weight", c("kde", "kcde", "sarima"))
+
+model_weights_fixed_reg <- lapply(stacking_fits_fixed_reg,
+  function(stacking_fit) {
+    model_weights_one_fit <- compute_model_weights(stacking_fit,
+      newdata = newdata,
+      log = FALSE)
+
+    # model_weights <- compute_model_weights(stacking_fit_cv_fixed,
+    #     newdata = newdata,
+    #     log = FALSE)
+    colnames(model_weights_one_fit) <- c("kde", "kcde", "sarima")
+    weights_one_fit <- cbind(newdata,
+      model_weights_one_fit) %>% as.data.frame()
+
+    weights_one_fit <- weights_one_fit %>%
+      gather_("model", "weight", c("kde", "kcde", "sarima"))
+    weights_one_fit$df <- as.character(stacking_fit$spline_fits[[1]]$df)
+
+    return(weights_one_fit)
+  }) %>%
+  rbind.fill()
+
+  color_palette <- c("#E69F00", "#56B4E9", "#009E73")
+
+  p_onset_weights <- ggplot() +
+    geom_line(aes(x = analysis_time_season_week,
+        y = weight,
+        colour = model,
+        linetype = model,
+        group = factor(paste0(df, model))
+      ),
+      alpha = 0.4,
+      data = model_weights_fixed_reg) +
+    geom_line(aes(x = analysis_time_season_week,
+        y = weight,
+        colour = model,
+        linetype = model
+      ),
+      size = 1.3,
+      data = weights) +
+  #  facet_wrap( ~ quantity) +
+    scale_linetype("Model") +
+    scale_colour_manual("Model", values = color_palette) +
+    ylim(c(0,1)) +
+    xlab("Week of Season at Analysis Time") +
+  #  ylab("Model Weight") +
+  #  ggtitle("B: Component Model Weights") +
+    theme_bw(base_size = 11) +
+    theme(axis.title.y = element_blank(),
+#      legend.position = "none",
+      plot.margin = unit(c(3, 6, 0, 5), "pt"))
+
+print(p_onset_weights)
+@
+
+\newpage
+
+Which spline df values resulted in fits approximately as good as the best?  All of them!
+<<FluModelsOneFeatureWeightsCVTestResults>>=
+cv_results <- stacking_fit_cv_reg$cv_results[, 2:13]
+best_params_ind <- which.max(stacking_fit_cv_reg$cv_results[, 14])
+cv_nfolds <- 12
+sapply(seq_len(nrow(cv_results)),
+  function(ind) {
+    t.test(
+      x = as.numeric(cv_results[ind, paste0("cv_log_score_fold_", seq_len(cv_nfolds))]),
+      y = as.numeric(cv_results[best_params_ind, paste0("cv_log_score_fold_", seq_len(cv_nfolds))]),
+      paired = TRUE
+    )$p.value >= 0.05
+  })
+@
+
+Plot of weights from spline fits with different degrees of freedom -- COMBINED darker
+
+<<FluModelsOneFeatureWeightsCombined, eval = TRUE, cache = TRUE>>=
+
+model_weights_fixed_reg <- lapply(stacking_fits_fixed_reg,
+  function(stacking_fit) {
+    model_weights_one_fit <- compute_model_weights(stacking_fit,
+      newdata = newdata,
+      log = FALSE)
+
+    # model_weights <- compute_model_weights(stacking_fit_cv_fixed,
+    #     newdata = newdata,
+    #     log = FALSE)
+    colnames(model_weights_one_fit) <- c("kde", "kcde", "sarima")
+    weights_one_fit <- cbind(newdata,
+      model_weights_one_fit) %>% as.data.frame()
+
+    weights_one_fit <- weights_one_fit %>%
+      gather_("model", "weight", c("kde", "kcde", "sarima"))
+    weights_one_fit$df <- as.character(stacking_fit$spline_fits[[1]]$df)
+
+    return(weights_one_fit)
+  }) %>%
+  rbind.fill()
+
+weights <- model_weights_fixed_reg %>%
+  group_by(analysis_time_season_week, model) %>%
+  summarize(weight = mean(weight)) %>%
+  ungroup()
+
+  color_palette <- c("#E69F00", "#56B4E9", "#009E73")
+
+  p_onset_weights <- ggplot() +
+    geom_line(aes(x = analysis_time_season_week,
+        y = weight,
+        colour = model,
+        linetype = model,
+        group = factor(paste0(df, model))
+      ),
+      alpha = 0.4,
+      data = model_weights_fixed_reg) +
+    geom_line(aes(x = analysis_time_season_week,
+        y = weight,
+        colour = model,
+        linetype = model
+      ),
+      size = 1.3,
+      data = weights) +
+  #  facet_wrap( ~ quantity) +
+    scale_linetype("Model") +
+    scale_colour_manual("Model", values = color_palette) +
+    ylim(c(0,1)) +
+    xlab("Week of Season at Analysis Time") +
+  #  ylab("Model Weight") +
+  #  ggtitle("B: Component Model Weights") +
+    theme_bw(base_size = 11) +
+    theme(axis.title.y = element_blank(),
+#      legend.position = "none",
+      plot.margin = unit(c(3, 6, 0, 5), "pt"))
+
+print(p_onset_weights)
+@
+
+
+CODE NOT RUN:
+
+<<FluModelsMultipleFeatures, eval = FALSE>>=
+library(plyr)
+library(tidyr)
+library(dplyr)
+library(densitystackr)
+library(ggplot2)
+library(awes)
+
+region <- "National"
+prediction_target <- "peak_inc"
+explanatory_variables <- c("analysis_time_season_week", "kcde_model_confidence", "sarima_model_confidence")
+
+awes_path <- find.package("awes")
+target_loso_pred_res <- assemble_stacking_inputs(
+  regions = region,
+  prediction_target = prediction_target,
+  component_model_names = c("kde", "kcde", "sarima"),
+  explanatory_variables = explanatory_variables,
+  include_model_performance = TRUE,
+  preds_path = file.path(awes_path, "estimation/loso-predictions")
+)
+
+## get cross-validation groups
+cv_folds <- lapply(unique(target_loso_pred_res$analysis_time_season),
+  function(season_val) {
+    which(target_loso_pred_res$analysis_time_season == season_val)
+  })
+
+require(doMC)
+registerDoMC(4)
+
+#debug(density_stack)
+fit_formula <- as.formula(paste0(
+  paste0(c("kde", "kcde", "sarima"), "_log_score", collapse = " + "),
+  " ~ ",
+  paste(explanatory_variables, collapse = " + ")))
+fit_time_cv_reg <- system.time({
+  stacking_fit_cv_reg <- density_stack(
+    fit_formula,
+    data = target_loso_pred_res,
+    df = data.frame(
+      analysis_time_season_week = seq(from = 5, by = 5, length = 5),
+      kcde_model_confidence = seq(from = 5, by = 5, length = 5),
+      sarima_model_confidence = seq(from = 5, by = 5, length = 5)
+    ),
+    min_obs_weight = 1,
+    tol = 10^{-3},
+    maxit = 10^5,
+    cv_folds = cv_folds,
+    verbose = 1)
+})
+
+
+fit_time_cv_fixed <- system.time({
+  stacking_fit_cv_fixed <- density_stack(
+    fit_formula,
+    data = target_loso_pred_res,
+    lambda = 1,
+    min_obs_weight = 1,
+    tol = 10^{-3},
+    maxit = 10^5,
+    verbose = 2)
+})
+
+## get resulting model weights at a grid of values for chosen explanatory variables
+if("kcde_model_confidence" %in% explanatory_variables ||
+    "sarima_model_confidence" %in% explanatory_variables) {
+  if(identical(prediction_target, "peak_inc")) {
+    model_confidence_grid <- seq(from = 1, to = 99, by = 2)
+  } else if(identical(prediction_target, "onset")) {
+    model_confidence_grid <- seq_len(34)
+  } else {
+    ## peak_week
+    model_confidence_grid <- seq_len(33)
+  }
+} else {
+  model_confidence_grid <- 1
+}
+
+if("weighted_ili" %in% explanatory_variables) {
+  weighted_ili_grid <- seq(from = 0, to = 13, by = 0.5)
+} else {
+  weighted_ili_grid <- 1
+}
+
+typical_analysis_time_season_week <- 17L
+if(prediction_target %in% c("onset", "peak_week")) {
+  typical_model_confidence <- 5L
+} else {
+  typical_model_confidence <- 20L
+}
+typical_ili <- 2.5
+
+newdata <- bind_rows(
+  expand.grid(
+    analysis_time_season_week = 10:40,
+    kcde_model_confidence = model_confidence_grid,
+    sarima_model_confidence = typical_model_confidence,
+    weighted_ili = typical_ili,
+    stringsAsFactors = FALSE)[, explanatory_variables, drop = FALSE],
+  expand.grid(
+    analysis_time_season_week = 10:40,
+    kcde_model_confidence = typical_model_confidence,
+    sarima_model_confidence = model_confidence_grid,
+    weighted_ili = typical_ili,
+    stringsAsFactors = FALSE)[, explanatory_variables, drop = FALSE],
+  expand.grid(
+    analysis_time_season_week = 10:40,
+    kcde_model_confidence = typical_model_confidence,
+    sarima_model_confidence = typical_model_confidence,
+    weighted_ili = weighted_ili_grid,
+    stringsAsFactors = FALSE)[, explanatory_variables, drop = FALSE],
+  expand.grid(
+    analysis_time_season_week = typical_analysis_time_season_week,
+    kcde_model_confidence = model_confidence_grid,
+    sarima_model_confidence = model_confidence_grid,
+    weighted_ili = typical_ili,
+    stringsAsFactors = FALSE)[, explanatory_variables, drop = FALSE],
+  expand.grid(
+    analysis_time_season_week = typical_analysis_time_season_week,
+    kcde_model_confidence = model_confidence_grid,
+    sarima_model_confidence = typical_model_confidence,
+    weighted_ili = weighted_ili_grid,
+    stringsAsFactors = FALSE)[, explanatory_variables, drop = FALSE],
+  expand.grid(
+    analysis_time_season_week = typical_analysis_time_season_week,
+    kcde_model_confidence = typical_model_confidence,
+    sarima_model_confidence = model_confidence_grid,
+    weighted_ili = weighted_ili_grid,
+    stringsAsFactors = FALSE)[, explanatory_variables, drop = FALSE]
+  ) %>%
+  distinct()
+
+model_weights <- compute_model_weights(stacking_fit_cv_fixed,
+    newdata = newdata,
+    log = FALSE)
+colnames(model_weights) <- c("kde", "kcde", "sarima")
+weights <- cbind(newdata,
+  model_weights) %>% as.data.frame()
+
+weights <- weights %>%
+  gather_("model", "weight", c("kde", "kcde", "sarima"))
+
+typical_season_week <- 17L
+if(prediction_target %in% c("onset", "peak_week")) {
+  typical_confidence <- 5L
+} else {
+  typical_confidence <- 20L
+}
+
+p1 <- ggplot(
+  weights %>%
+    filter(sarima_model_confidence == typical_confidence &
+        kcde_model_confidence %% 2 == 1) %>%
+    mutate(model = toupper(model))) +
+  geom_raster(aes(x = analysis_time_season_week, y = kcde_model_confidence, fill = weight)) +
+  scale_fill_gradient2("Model\nWeight",
+    breaks = c(0, 0.25, 0.5, 0.75, 1),
+    labels = as.character(c(0, 0.25, 0.5, 0.75, 1)),
+    low = "#b2182b",
+    mid = "#f7f7f7",
+    high = "#2166ac",
+    midpoint = 0.5) +
+  facet_wrap(~ model, nrow = 1L) +
+  xlab("Season Week at Analysis Time") +
+  ylab("KCDE Model Uncertainty") +
+  theme_bw()
+
+plot_legend <- get_legend_grob(p1)
+
+p1 <- p1 + theme(legend.position = "none")
+
+p2 <- ggplot(
+  weights %>%
+    filter(kcde_model_confidence == typical_confidence &
+        sarima_model_confidence %% 2 == 1) %>%
+    mutate(model = toupper(model))) +
+  geom_raster(aes(x = analysis_time_season_week, y = sarima_model_confidence, fill = weight)) +
+  scale_fill_gradient2("Model\nWeight",
+    breaks = c(0, 0.25, 0.5, 0.75, 1),
+    labels = as.character(c(0, 0.25, 0.5, 0.75, 1)),
+    low = "#b2182b",
+    mid = "#f7f7f7",
+    high = "#2166ac",
+    midpoint = 0.5) +
+  facet_wrap(~ model, nrow = 1L) +
+  xlab("Season Week at Analysis Time") +
+  ylab("SARIMA Model Uncertainty") +
+  theme_bw() +
+  theme(legend.position = "none")
+
+p3 <- ggplot(
+  weights %>%
+    filter(
+      analysis_time_season_week == typical_season_week &
+      kcde_model_confidence %%2 == 1 &
+      sarima_model_confidence %% 2 == 1) %>%
+    mutate(model = toupper(model))) +
+  geom_raster(aes(x = kcde_model_confidence, y = sarima_model_confidence, fill = weight)) +
+  scale_fill_gradient2("Model\nWeight",
+    breaks = c(0, 0.25, 0.5, 0.75, 1),
+    labels = as.character(c(0, 0.25, 0.5, 0.75, 1)),
+    low = "#b2182b",
+    mid = "#f7f7f7",
+    high = "#2166ac",
+    midpoint = 0.5) +
+  facet_wrap(~ model, nrow = 1L) +
+  xlab("KCDE Model Uncertainty") +
+  ylab("SARIMA Model Uncertainty") +
+  theme_bw() +
+  theme(legend.position = "none")
+
+
+grid.newpage()
+num_lines_text <- 1
+pushViewport(viewport(layout =
+    grid.layout(nrow = 6, ncol = 2,
+      heights = unit(
+        c(num_lines_text, 1, num_lines_text, 1, num_lines_text, 1),
+        rep(c("lines", "null"), 3)),
+      widths = unit(c(4, 1), c("null", "null")))))
+grid.text("A: SARIMA Model Uncertainty Fixed at 20",
+  x = unit(0, "npc"),
+  just = "left",
+  gp = gpar(fontsize = 12),
+  vp = viewport(layout.pos.row = 1, layout.pos.col = 1:2))
+grid.text("B: KCDE Model Uncertainty Fixed at 20",
+  x = unit(0, "npc"),
+  just = "left",
+  gp = gpar(fontsize = 12),
+  vp = viewport(layout.pos.row = 3, layout.pos.col = 1:2))
+grid.text("C: Season Week Fixed at 17",
+  x = unit(0, "npc"),
+  just = "left",
+  gp = gpar(fontsize = 12),
+  vp = viewport(layout.pos.row = 5, layout.pos.col = 1:2))
+
+print(p1, vp = viewport(layout.pos.row = 2, layout.pos.col = 1))
+print(p2, vp = viewport(layout.pos.row = 4, layout.pos.col = 1))
+print(p3, vp = viewport(layout.pos.row = 6, layout.pos.col = 1))
+
+pushViewport(viewport(layout.pos.row = 3:4, layout.pos.col = 2))
+grid.draw(plot_legend)
+upViewport()
 @
 
 \end{document}

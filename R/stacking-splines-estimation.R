@@ -10,7 +10,7 @@
 #'
 #' @return a matrix with num_models columns and num_obs rows, with (log) weight
 #'   for model m at observation i in entry [i, m]
-compute_model_weights_from_spline_f_hats <- function(
+compute_model_weights_from_f_hats <- function(
   f_hats,
   M = M,
   J = J,
@@ -49,46 +49,100 @@ compute_model_weights_from_spline_f_hats <- function(
 compute_model_weights <- function(
   density_stack_fit,
   newdata,
+  append_newdata = FALSE,
   log = FALSE) {
   if(!identical(class(density_stack_fit), "density_stack")) {
     stop("density_stack_fit must be an object of type density_stack!")
   }
 
-  ## convert newdata to matrix format
-  newdata_matrix <- Formula::model.part(density_stack_fit$formula,
-    data = newdata,
-    rhs = 1) %>%
-      as.matrix() %>%
-      `storage.mode<-`("double")
+  if("best_fits" %in% names(density_stack_fit)) {
+    ## cross-validation was used to select regularization parameters
+    ## combine weights from all models and means
+    model_weights <- rbind.fill(lapply(seq_along(density_stack_fit$best_fits),
+      function(component_fit_ind) {
+        compute_model_weights(
+          density_stack_fit = density_stack_fit$best_fits[[component_fit_ind]],
+          newdata = newdata,
+          append_newdata = TRUE,
+          log = log
+        ) %>%
+        as.data.frame() %>%
+        mutate(param_set = component_fit_ind)
+      }))
+    model_weights_summarized <- model_weights %>%
+      group_by_(names(newdata)[names(newdata) %in% names(model_weights)]) %>%
+      summarize_each(
+        funs = rep("mean", ncol(model_weights))
+      )
+    colname_inds_to_replace <- which(substr(colnames(model_weights_summarized),
+      nchar(colnames(model_weights_summarized)) - 4,
+      nchar(colnames(model_weights_summarized))) == "_mean")
+    colnames(model_weights_summarized)[colname_inds_to_replace] <-
+      substr(colnames(model_weights_summarized)[colname_inds_to_replace],
+        1,
+        nchar(colnames(model_weights_summarized)[colname_inds_to_replace]) - 5)
+    model_weights_summarized$param_set <- "combined"
+    model_weights <- rbind(model_weights,
+      model_weights_summarized
+    )
+    if(!append_newdata) {
+      model_weights <- model_weights[,
+        !(colnames(model_weights) %in% colnames(newdata)),
+        drop = FALSE]
+    }
+  } else {
+    ## convert newdata to matrix format
+    newdata_df <- Formula::model.part(density_stack_fit$formula,
+      data = newdata,
+      rhs = 1)
+    newdata_matrix <- newdata_df %>%
+        as.matrix() %>%
+        `storage.mode<-`("double")
 
-  ## get spline fitted values
-  M <- ncol(density_stack_fit$model_scores)
-  J <- ncol(density_stack_fit$dtrain)
-  f_hat <- matrix(NA,
-    nrow = nrow(newdata_matrix),
-    ncol = M * J)
-  m_j_pairs <- expand.grid(
-    m = seq_len(M),
-    j = seq_len(J),
-    stringsAsFactors = FALSE
-  )
-  for(update_ind in seq_len(nrow(m_j_pairs))) {
-    m <- m_j_pairs$m[update_ind]
-    j <- m_j_pairs$j[update_ind]
-    f_hat[, j + (m - 1) * J] <- predict(
-      density_stack_fit$spline_fits[[update_ind]],
-      x = newdata_matrix[, j])$y
+    ## get fitted values
+    M <- ncol(density_stack_fit$model_scores)
+    J <- ncol(density_stack_fit$dtrain)
+    f_hat <- matrix(NA,
+      nrow = nrow(newdata_matrix),
+      ncol = M * J)
+    m_j_pairs <- expand.grid(
+      m = seq_len(M),
+      j = seq_len(J),
+      stringsAsFactors = FALSE
+    )
+    for(update_ind in seq_len(nrow(m_j_pairs))) {
+      m <- m_j_pairs$m[update_ind]
+      j <- m_j_pairs$j[update_ind]
+      if("lm" %in% class(density_stack_fit$smoother_fits[[update_ind]])) {
+        f_hat[, j + (m - 1) * J] <- predict(
+          density_stack_fit$smoother_fits[[update_ind]],
+          newdata = data.frame(
+            x = newdata_matrix[, j]))
+      } else if("smooth.spline" %in% class(density_stack_fit$smoother_fits[[update_ind]])) {
+        f_hat[, j + (m - 1) * J] <- predict(
+          density_stack_fit$smoother_fits[[update_ind]],
+          x = newdata_matrix[, j])$y
+      }
+    }
+
+    ## convert to weights
+    model_weights <-  compute_model_weights_from_f_hats(f_hat,
+      M = M,
+      J = J,
+      log = log)
+
+    ## set column names
+    colnames(model_weights) <-
+      strsplit(as.character(density_stack_fit$formula)[2], " + ", fixed = TRUE)[[1]]
+
+    ## append newdata
+    if(append_newdata) {
+      model_weights <- cbind(
+        newdata_df,
+        model_weights
+      )
+    }
   }
-
-  ## convert to weights
-  model_weights <-  compute_model_weights_from_spline_f_hats(f_hat,
-    M = M,
-    J = J,
-    log = log)
-
-  ## set column names
-  colnames(model_weights) <-
-    strsplit(as.character(density_stack_fit$formula)[2], " + ", fixed = TRUE)[[1]]
 
   ## return
   return(model_weights)
@@ -124,7 +178,7 @@ log_lik_score <- function(log_model_weights, log_model_scores) {
 #'   See the package vignette for derivations of these calculations.  This
 #'   function is suitable for use as the "obj" function in a call to
 #'   xgboost::xgb.train
-compute_spline_working_weights_and_response <- function(
+compute_working_weights_and_response <- function(
   f_hat_old,
   component_model_log_scores,
   dtrain,
@@ -135,7 +189,7 @@ compute_spline_working_weights_and_response <- function(
   min_obs_weight = 1) {
 
   ## Compute log of component model weights at each observation
-  log_weights <- compute_model_weights_from_spline_f_hats(f_hat_old,
+  log_weights <- compute_model_weights_from_f_hats(f_hat_old,
     M = M,
     J = J,
     log = TRUE)
@@ -248,8 +302,9 @@ compute_spline_working_weights_and_response <- function(
 #'   fit mapping observed variables to component model weights
 #'
 #' @export
-density_stack_splines_fixed_regularization <- function(formula,
+density_stack_fixed_regularization <- function(formula,
   data,
+  smoothers = "smooth.spline",
   df = NULL,
   spar = NULL,
   lambda = NULL,
@@ -283,6 +338,18 @@ density_stack_splines_fixed_regularization <- function(formula,
     w = quote(temp$w),
     cv = NA,
     keep.data = FALSE
+  )
+
+  ## list of arguments to lm(), suitable for use with do.call()
+  ## dtrain and temp are objects that will have been intantiated at the time
+  ## smooth.spline() is called below.
+  lm_args <- list(
+    formula = y ~ 0 + x,
+    weights = quote(temp$w),
+    data = quote(
+      data.frame(
+        x = dtrain[, j],
+        y = temp$y))
   )
 
   ## clean up regularization parameter and add to smooth.spline_args
@@ -322,6 +389,12 @@ density_stack_splines_fixed_regularization <- function(formula,
     }
   }
 
+  if(identical(length(smoothers), 1L)) {
+    smoothers <- rep(smoothers, J)
+  } else if(!identical(length(smoothers), as.integer(J))) {
+    stop("Argument 'smoothers' must be a character vector of length 1 or J where J is the number of predictive covariates.")
+  }
+
   ## get fit
   f_hat_new <- matrix(0, nrow = N, ncol = M * J)
   f_hat_ssd <- tol + 1
@@ -335,12 +408,12 @@ density_stack_splines_fixed_regularization <- function(formula,
     ## store spline fit values from previous iteration
     f_hat_old <- f_hat_new
 
-    for(update_ind in seq_len(nrow(m_j_pairs))) { # SWITCH TO FOREACH LATER??
+    for(update_ind in seq_len(nrow(m_j_pairs))) {
       m <- m_j_pairs$m[update_ind]
       j <- m_j_pairs$j[update_ind]
 
-      ## Fit spline for model m, covariates j
-      temp <- compute_spline_working_weights_and_response(
+      ## Fit smoother for model m, covariates j
+      temp <- compute_working_weights_and_response(
         f_hat_old = f_hat_old,
         component_model_log_scores = model_scores,
         dtrain = dtrain,
@@ -350,17 +423,20 @@ density_stack_splines_fixed_regularization <- function(formula,
         J = J,
         min_obs_weight = min_obs_weight)
 
-      spline_fit_m_j <- do.call("smooth.spline", smooth.spline_args)
+      if(identical(unname(smoothers[j]), "smooth.spline")) {
+        smoother_fit_m_j <- do.call("smooth.spline", smooth.spline_args)
 
-      ## update f_hat_new
-      fitted_values <- data.frame(
-        x = spline_fit_m_j$x,
-        y = spline_fit_m_j$y
-      )
-      f_hat_new[, j + (m - 1) * J] <-
-        data.frame(x = dtrain[, j]) %>%
-          dplyr::left_join(fitted_values, by = "x") %>%
-          `[[`("y")
+        ## fitted values used to update f_hat_new
+        f_hat_new[, j + (m - 1) * J] <-
+          predict(smoother_fit_m_j, x = dtrain[, j])$y
+      } else if(identical(unname(smoothers[j]), "lm")) {
+        smoother_fit_m_j <- do.call("lm", lm_args)
+
+        ## fitted values used to update f_hat_new
+        f_hat_new[, j + (m - 1) * J] <- fitted(smoother_fit_m_j)
+      } else {
+        stop("Invalid smoother type: currently, only 'smooth.spline' and 'lm' are supported.")
+      }
     }
 
     ## sum of squared differences in fitted spline values between iterations
@@ -381,13 +457,13 @@ density_stack_splines_fixed_regularization <- function(formula,
   }
 
   ## one last update to get final spline fits to save/return
-  spline_fits <- lapply(seq_len(nrow(m_j_pairs)),
+  smoother_fits <- lapply(seq_len(nrow(m_j_pairs)),
     function(update_ind) {
       m <- m_j_pairs$m[update_ind]
       j <- m_j_pairs$j[update_ind]
 
-      ## Fit spline for model m, covariates j
-      temp <- compute_spline_working_weights_and_response(
+      ## Fit smoother for model m, covariates j
+      temp <- compute_working_weights_and_response(
         f_hat_old = f_hat_old,
         component_model_log_scores = model_scores,
         dtrain = dtrain,
@@ -397,17 +473,23 @@ density_stack_splines_fixed_regularization <- function(formula,
         J = J,
         min_obs_weight = min_obs_weight)
 
-      spline_fit_m_j <- do.call("smooth.spline", smooth.spline_args)
+      if(identical(unname(smoothers[j]), "smooth.spline")) {
+        smoother_fit_m_j <- do.call("smooth.spline", smooth.spline_args)
+      } else if(identical(unname(smoothers[j]), "lm")) {
+        smoother_fit_m_j <- do.call("lm", lm_args)
+      }
 
-      return(spline_fit_m_j)
+      return(smoother_fit_m_j)
   })
 
   ## return
   return(structure(
-    list(spline_fits = spline_fits,
+    list(smoother_fits = smoother_fits,
       formula = formula,
       model_scores = model_scores,
       dtrain = dtrain,
+      df = df,
+      spar = spar,
       lambda = lambda),
     class = "density_stack"
   ))
@@ -423,6 +505,7 @@ density_stack_splines_fixed_regularization <- function(formula,
 #' @export
 density_stack <- function(formula,
   data,
+  smoothers = "smooth.spline",
   df = NULL,
   spar = NULL,
   lambda = NULL,
@@ -431,6 +514,7 @@ density_stack <- function(formula,
   maxit = 10^5,
   cv_folds = NULL,
   cv_nfolds = 10L,
+  cv_refit = "ttest",
   verbose = 0) {
 
   ## keep only one set of regularization parameters
@@ -451,13 +535,50 @@ density_stack <- function(formula,
     spar <- 0.5
   }
 
-  ## list of arguments suitable for use in a call to via do.call()
+  ## list of arguments suitable for use in a call to
+  ## density_stack_fixed_regularization() via do.call()
   density_stack_fixed_reg_params <- list(
     formula = formula,
     min_obs_weight = min_obs_weight,
     tol = tol,
     maxit = maxit,
     verbose = verbose - 1L)
+
+  ## get data, names of covariates
+  formula_as_Formula <- Formula::Formula(formula)
+
+  ## response, as a matrix of type double
+  model_scores <- Formula::model.part(formula_as_Formula, data = data, lhs = 1) %>%
+    as.matrix() %>%
+    `storage.mode<-`("double")
+
+  ## predictors, as a matrix of type double -- but only the first row
+  dtrain <- Formula::model.part(formula_as_Formula, data = data[1, , drop = FALSE], rhs = 1) %>%
+    as.matrix() %>%
+    `storage.mode<-`("double")
+
+  ## number of models, observations, covariates
+  M <- ncol(model_scores)
+  N <- nrow(model_scores)
+  J <- ncol(dtrain)
+  covar_names <- colnames(dtrain)
+
+  ## clean up smoothers argument
+  ## ensure that either
+  ## (a) a smoother was provided for all covariates, or
+  ## (b) only one smoother was provided, to be used for all covariates
+  if(!is.null(smoothers)) {
+    if(length(smoothers) > 1) {
+      if(!all(covar_names %in% names(smoothers))) {
+        stop("Smoothers must be either a character vector of length one or a named character vector whose names include all covariates in right-hand side of formula: ", paste(covar_names, sep = ", "))
+      }
+      ## pull out only relevant parameter values, in correct order
+      smoothers <- smoothers[covar_names]
+    }
+
+    ## add argument to density_stack_fixed_reg_params
+    density_stack_fixed_reg_params$smoothers <- smoothers
+  }
 
   if(ifelse(is.data.frame(df), nrow(df) > 1, FALSE) ||
     ifelse(is.data.frame(spar), nrow(spar) > 1, FALSE) ||
@@ -478,25 +599,6 @@ density_stack <- function(formula,
     } else {
       cv_nfolds <- length(cv_folds)
     }
-
-    ## get data, names of covariates
-    formula <- Formula::Formula(formula)
-
-    ## response, as a matrix of type double
-    model_scores <- Formula::model.part(formula, data = data, lhs = 1) %>%
-      as.matrix() %>%
-      `storage.mode<-`("double")
-
-    ## predictors, as a matrix of type double
-    dtrain <- Formula::model.part(formula, data = data[1, , drop = FALSE], rhs = 1) %>%
-      as.matrix() %>%
-      `storage.mode<-`("double")
-
-    ## number of models, observations, covariates
-    M <- ncol(model_scores)
-    N <- nrow(model_scores)
-    J <- ncol(dtrain)
-    covar_names <- colnames(dtrain)
 
     ## ensure that either
     ## (a) regularization parameter values were provided for all covariates, or
@@ -575,13 +677,14 @@ density_stack <- function(formula,
         foreach(k = seq_len(cv_nfolds), .combine = c) %dopar% {
   #      for(k in seq_len(cv_nfolds)) { # REPLACE WITH FOREACH LATER
           ## step a) get fit leaving out fold k
-          stacking_fit_k <- do.call("density_stack_splines_fixed_regularization",
+          stacking_fit_k <- do.call("density_stack_fixed_regularization",
             density_stack_fixed_reg_params)
 
           ## step b) get log score for fold k (val for validation)
             log_lik_score(
               log_model_weights = compute_model_weights(stacking_fit_k,
                 newdata = data[cv_folds[[k]], covar_names, drop = FALSE],
+                append_newdata = FALSE,
                 log = TRUE),
               log_model_scores = model_scores[cv_folds[[k]], , drop = FALSE])
         } # end code to get log score for each k-fold (foreach)
@@ -600,23 +703,76 @@ density_stack <- function(formula,
 
     ## get fit with all training data based on selected parameters
     density_stack_fixed_reg_params$data <- quote(data)
-
     best_params_ind <- which.max(cv_results$cv_log_score_mean)
     reg_param_name <- names(density_stack_fixed_reg_params)[
       names(density_stack_fixed_reg_params) %in% c("df", "spar", "lambda")
     ]
-    density_stack_fixed_reg_params[[reg_param_name]] <-
-      quote(cv_results[best_params_ind, seq_len(num_reg_param_cols)])
 
-    density_stack_fit <- do.call("density_stack_splines_fixed_regularization",
-      density_stack_fixed_reg_params)
+    if(identical(cv_refit, "best")) {
+      ## fit based on the single set of parameter values with best performance
+      ## best ind has highest log score
+      density_stack_fixed_reg_params[[reg_param_name]] <-
+        quote(cv_results[best_params_ind, seq_len(num_reg_param_cols)])
+      density_stack_fit <- do.call("density_stack_fixed_regularization",
+        density_stack_fixed_reg_params)
 
-    density_stack_fit$cv_results <- cv_results
+      density_stack_fit$cv_results <- cv_results
+    } else if(identical(cv_refit, "ttest")) {
+      ## fits based on all sets of parameter values with cv performance
+      ## not different from the cv performance of the best parameter set
+      ## according to a paired t test looking at results from all cv folds
+      ## best ind has highest log score
+      refit_params_inds <- sapply(seq_len(nrow(cv_results)),
+        function(ind) {
+          t.test(
+            x = as.numeric(cv_results[ind,
+              paste0("cv_log_score_fold_", seq_len(cv_nfolds))]),
+            y = as.numeric(cv_results[best_params_ind,
+              paste0("cv_log_score_fold_", seq_len(cv_nfolds))]),
+            paired = TRUE
+          )$p.value >= 0.05
+        })
+      ## NA's may result if CV prediction log scores are the same for the model
+      ## specified by ind as for the model specified by best_params_ind (and so
+      ## NA is guaranteed at at least the index of best_params_ind
+      refit_params_inds[is.na(refit_params_inds)] <- TRUE
+
+      params <- cv_results[refit_params_inds,
+        seq_len(ncol(cv_results) - cv_nfolds - 1), drop = FALSE]
+
+      density_stack_fixed_reg_params[[reg_param_name]] <-
+        quote(cv_results[k, seq_len(num_reg_param_cols)])
+
+      density_stack_fits_best_params <-
+        foreach(k = seq_len(nrow(params))) %dopar% {
+          do.call("density_stack_fixed_regularization",
+            density_stack_fixed_reg_params)
+        }
+
+      density_stack_fit <- structure(
+        list(best_fits = density_stack_fits_best_params,
+          params = params,
+          cv_results = cv_results,
+          formula = formula,
+          model_scores = model_scores,
+          dtrain = dtrain,
+          df = df,
+          spar = spar,
+          lambda = lambda),
+        class = "density_stack"
+      )
+    } else if(identical(cv_refit, "none")) {
+      fit <- NULL
+    } else {
+      warning("Invalid option for cv_refit: must be one of 'best', 'ttest', or 'none'; treating as 'none'")
+      fit <- NULL
+    }
   } else {
     ## no cross-validation for parameter selection
     ## get fit with all training data based on provided parameters
-    density_stack_fit <- density_stack_splines_fixed_regularization(
+    density_stack_fit <- density_stack_fixed_regularization(
       formula = formula,
+      smoothers = smoothers,
       data = data,
       df = df,
       spar = spar,

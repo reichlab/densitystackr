@@ -2,7 +2,7 @@
 
 export(compute_model_weights)
 export(density_stack)
-export(density_stack_splines_fixed_regularization)
+export(density_stack_fixed_regularization)
 export(xgbstack)
 importFrom(Rcpp,evalCpp)
 useDynLib(densitystackr, .registration = TRUE)
